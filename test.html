@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BTC Prediction with TensorFlow.js</title>
+    <!-- 引入 TensorFlow.js -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs/dist/tf.min.js"></script>
+
+    <!-- 在 head 或 body 中引入 ECharts -->
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+
+    <!-- 引入模型函数 -->
+    <script src="./model.js"></script>
+    <!-- 引入数据处理函数 -->
+    <script src="./data.js"></script>
+    <!-- 引入 summary.js -->
+    <script src="./summary.js"></script>
+</head>
+<body>
+    <h1>BTC Price and Volume Prediction</h1>
+    <div>
+        <p>本示例使用 TensorFlow.js 训练模型预测比特币（BTC）每日价格。</p>
+        <p>1. 上传模型训练数据（CSV）</p>
+        <p>2. 上传保存的模型文件（json）</p>
+        <p>3. 上传保存的模型文件（bin）</p>
+        <p>4. 点击加载模型</p>
+        <p>5. 上传预测数据（CSV）</p>
+    </div>
+    <div style="display: block;" >
+        <label for="trainCsvFile">
+            1.上传训练数据（CSV）：
+        </label>
+        <input type="file" id="trainCsvFile" accept=".csv" onchange="main('trainCsvFile')"/>
+        <label for="model-json">
+            2.上传保存的模型文件（json）：
+        </label>
+        <input type="file" id="model-json" accept=".json"/>
+        <label for="model-weights">
+            3.上传保存的模型文件（bin）：
+        </label>
+        <input type="file" id="model-weights" accept=".bin"/>
+        <label for="model">
+            4.点击加载模型：
+        </label>
+        <button id="loadModel" onclick="loadModelMain()">加载模型</button>
+    </div>
+    <label for="predictCsvFile">
+        5.上传预测数据（CSV）：
+    </label>
+    <input type="file" id="predictCsvFile" accept=".csv" onchange="main('predictCsvFile')"/>
+    
+    <div id="priceChart" style="width: 100%; height: 600px;"></div>
+    <div id="predictChart" style="width: 100%; height: 600px;"></div>
+    <div id="lossChart" style="width: 100%; height: 600px;"></div>
+    <div id="valLossChart" style="width: 100%; height: 600px;"></div>
+    <script>
+        // 公共参数
+        // 窗口大小，使用过去n天的数据作为趋势特征
+        let windowSize = 8;
+        // 特征数
+        let features = 4;
+        // 输出
+        let outputSize = 3;
+        // 损失图表最大值
+        let lossMax = 1;
+        // 验证损失图表最大值
+        let valLossMax = 10;
+        // 模型
+        let trainedModel;
+
+        async function main(elementId) {
+            // 加载和解析 CSV 文件
+            let fileInput = document.getElementById(elementId);
+            let file = fileInput.files[0];
+            if (!file) return;
+
+            let reader = new FileReader();
+            
+            reader.onload = async function(event) {
+                // 基础数据
+                let { lastDate, priceData, actualPrice, volumeData } = processCSVData(event.target.result);
+                // 标准化数据
+                let priceNorm = standardize(priceData);
+                let volumeNorm = standardize(volumeData.map(x => Math.log(x + 1)));
+                
+                // 构建训练集
+                let { xsData, ysData, windowfeatures }= buildTrainDataSet(priceNorm, volumeNorm, windowSize);
+                // 转成张量
+                let { xs, ys } = convertTensorData(xsData, ysData, windowSize, features, outputSize);
+                
+                if(elementId === 'trainCsvFile') {
+                    // 定义模型
+                    let model = defineModel(windowSize, features, outputSize);
+                    // 训练模型
+                    let { lossData, valLossData } = await modelTrain(model, xs, ys);
+                    // 预测拟合数据
+                    let predictionsList = await modelPredict(
+                        model, xsData, windowSize, features, windowfeatures, priceNorm, actualPrice
+                    );
+                    // 预测收盘价格图表
+                    let cutPriceData = actualPrice.slice(15000);
+                    let cutPredictionsList = predictionsList.slice(15000);
+                    showPriceChart('priceChart', cutPriceData, cutPredictionsList, 60000, 120000);
+                    // 损失图表
+                    let lossXAxis = [];
+                    for(let i=0; i<lossData.length; i++){
+                        lossXAxis.push(i);
+                    }
+                    let lossSerices = [{
+                        name: '训练损失',
+                        type: 'line',
+                        data: lossData,
+                        itemStyle: { color: '#3366FF' },  // 深蓝色
+                        lineStyle: { width: 2 }
+                    }];
+                    let valLossSerices = [{
+                        name: '验证损失',
+                        type: 'line',
+                        data: valLossData,
+                        itemStyle: { color: '#FF3030' },  // 红色
+                        lineStyle: { width: 2 }
+                    }];
+                    showChart('lossChart', ["训练损失"], lossXAxis, 0, lossMax, lossSerices);
+                    showChart('valLossChart', ["验证损失"], lossXAxis, 0, valLossMax, valLossSerices);
+                } else if (elementId === 'predictCsvFile') {
+                    // 模型预测
+                    let predictionsList = await modelPredict(
+                        trainedModel, xsData, windowSize, features, windowfeatures, priceNorm, actualPrice
+                    );
+                    let max = 110000;
+                    let min = 75000;
+                    showPriceChart('predictChart', actualPrice, predictionsList, min, max);
+                    // 策略总结
+                    summary(lastDate, actualPrice, predictionsList, windowSize);
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        // 加载模型
+        async function loadModelMain(){
+            trainedModel = await loadModel('model-json', 'model-weights');
+        }
+
+        // 显示价格图表
+        function showPriceChart(chartName, actualData, predictData, min = 0, max = 120000){
+            // 生成空数组
+            let nullArray = new Array(windowSize*3).fill(null);
+            let legendData = ["实际", "预测"];
+            let xAxisData = [];
+            for(let i=1; i<=(actualData.length+3); i++){
+                xAxisData.push(i);
+            }
+            let series = [{
+                name: '实际',
+                type: 'line',
+                data: actualData,
+                itemStyle: { color: '#3366FF' },  // 深蓝色
+                lineStyle: { width: 2 }
+            },
+            {
+                name: '预测',
+                type: 'line',
+                data: [...nullArray, ...predictData],
+                itemStyle: { color: '#FF3030' },
+                lineStyle: { width: 2, type: 'dashed' }
+            }];
+
+            // 显示图表 
+            showChart(chartName, legendData, xAxisData, min, max, series);
+        }
+
+        // 显示图表
+        function showChart(chartName, legendData = ["实际", "预测"], xAxisData, min, max, series) {
+            let chart = echarts.init(document.getElementById(chartName));
+            chart.setOption({
+                title: { 
+                    text: chartName,
+                    left: 'center',
+                    textStyle: { fontSize: 16 }
+                },
+                tooltip: { 
+                    trigger: 'axis',
+                    axisPointer: { type: 'cross' }  // 十字准星指示器
+                },
+                legend: {
+                    data: legendData,
+                    bottom: 10,                     // 图例放在底部
+                    itemWidth: 12,                  // 图例标记宽度
+                    itemHeight: 8,                  // 图例标记高度
+                    textStyle: { fontSize: 12 }     // 文字大小
+                },
+                xAxis: { 
+                    type: 'category',
+                    data: xAxisData,
+                    axisLabel: { 
+                        rotate: 45,
+                        interval: function(index) {
+                            return index % 10 === 0;
+                        }
+                    }
+                },
+                grid: {
+                    top: 80,    // 避免标题和图例遮挡
+                    bottom: 80  // 为图例留空间
+                },
+                yAxis: { 
+                    type: 'value',
+                    min: min,
+                    max: max
+                },
+                series: series,
+            });
+        }
+    </script>
+</body>
+</html>
